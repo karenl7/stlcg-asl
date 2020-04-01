@@ -7,6 +7,7 @@ import sys
 # from utils import tensor_to_str
 '''
 Important information:
+- This uses an arithmetic-geometric mean robustness metric: https://arxiv.org/pdf/1903.05186.pdf
 - Assume inputs are already reversed, but user does not need to worry about the indexing.
 - "pscale" stands for "predicate scale" (not the scale used in maxish and minish)
 - "scale" is the scale used in maxish and minish which Always, Eventually, Until, and Then uses.
