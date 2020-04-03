@@ -62,6 +62,11 @@ def convert_to_input_values(inputs):
     
 
 class Maxish(torch.nn.Module):
+    '''
+    If some elements are >0, output is the average of those elements.
+    If all the elements <= 0, output is -ᵐ√(Πᵢ (1 - ηᵢ)) + 1.
+    scale doesn't play a role here except to switch between the using the AGM or true robustness value (scale <=0).
+    '''
     def __init__(self, name="Maxish input"):
         super(Maxish, self).__init__()
         self.input_name = name
@@ -72,11 +77,15 @@ class Maxish(torch.nn.Module):
          x is of size [batch_size, N, ...] where N is typically the trace length
          if scale <= 0, then the true max is used, otherwise, the softmax is used.
         '''
+
         if isinstance(x, Expression):
             assert x._value is not None, "Input Expression does not have numerical values"
             x = x._value
         if scale > 0:
-            return (torch.softmax(x*scale, dim=dim)*x).sum(dim, keepdim=keepdim)
+            if torch.gt(x, 0).any():
+                return x[torch.gt(x, 0)].reshape(*x.shape[:-1], -1).mean(dim=dim, keepdim=keepdim)
+            else:
+                return -torch.log(1-x).mean(dim=dim, keepdim=keepdim).exp() + 1
         else:
             return x.max(dim, keepdim=keepdim)[0]
 
@@ -85,6 +94,11 @@ class Maxish(torch.nn.Module):
         return [str(self.input_name)]
 
 class Minish(torch.nn.Module):
+    '''
+    If all elements are >0, output is ᵐ√(Πᵢ (1 + ηᵢ)) - 1. 
+    If some the elements <= 0, output is the average of those negative values.
+    scale doesn't play a role here except to switch between the using the AGM or true robustness value (scale <=0).
+    '''
     def __init__(self, name="Minish input"):
         super(Minish, self).__init__()
         self.input_name = name
@@ -100,7 +114,10 @@ class Minish(torch.nn.Module):
             x = x._value
 
         if scale > 0:
-            return (torch.softmax(-x*scale, dim=dim)*x).sum(dim, keepdim=keepdim)
+            if torch.gt(x, 0).all():
+                return torch.log(1+x).mean(dim=dim, keepdim=keepdim).exp() - 1
+            else:
+                return x[torch.lt(x, 0)].reshape(*x.shape[:-1], -1).mean(dim=dim, keepdim=keepdim)
         else:
             return x.min(dim, keepdim=keepdim)[0]
 
@@ -113,7 +130,7 @@ class STL_Formula(torch.nn.Module):
     def __init__(self):
         super(STL_Formula, self).__init__()
 
-    def robustness_trace(self, trace, pscale=1, scale=-1, **kwargs):
+    def robustness_trace(self, trace, pscale=1, scale=-1, keepdim=True, **kwargs):
         '''
         Trace should have size [batch_size, time_dim, ...]
         The output robustness_trace has size [batch_size, time_dim, ...]
@@ -121,39 +138,39 @@ class STL_Formula(torch.nn.Module):
         '''
         raise NotImplementedError("robustness_trace not yet implemented")
 
-    def robustness(self, inputs, time=0, pscale=1, scale=-1, **kwargs):
+    def robustness(self, inputs, time=0, pscale=1, scale=-1, keepdim=True, **kwargs):
         '''
         Trace should have size [batch_size, time_dim, x_dim]
         Extracts the robustness_trace value at the given time. (Default: time=0 assuming reverse trace)
         '''
-        return self.robustness_trace(inputs, pscale=pscale, scale=scale)[:,-(time+1),:].unsqueeze(1)
+        return self.robustness_trace(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)[:,-(time+1),:].unsqueeze(1)
 
-    def eval_trace(self, inputs, pscale=1, scale=-1, **kwargs):
+    def eval_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
         '''
         Trace should have size [batch_size, time_dim, x_dim]
         The output eval_trace has size [batch_size, time_dim, x_dim]
         The values in eval_trace are 0 or 1 (False or True)
         '''
-        return self.robustness_trace(inputs, pscale=pscale, scale=scale) > 0
+        return self.robustness_trace(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs) > 0
 
-    def eval(self, inputs, time=0, pscale=1, scale=-1, **kwargs):
+    def eval(self, inputs, time=0, pscale=1, scale=-1, keepdim=True, **kwargs):
         '''
         Trace should have size [batch_size, time_dim, x_dim]
         Extracts the eval_trace value at the given time. (Default: time=0)
         '''
-        return self.eval_trace(inputs, pscale=pscale, scale=scale)[:,-(time+1),:].unsqueeze(1)                 # [batch_size, time_dim, x_dim]
+        return self.eval_trace(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)[:,-(time+1),:].unsqueeze(1)                 # [batch_size, time_dim, x_dim]
 
-    def forward(formula, inputs, pscale=1, scale=-1, **kwargs):
+    def forward(formula, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
         '''
         Evaluates the robustness_trace given the input. The input is converted to the numerical value first.
         '''
         if isinstance(inputs, Expression):
             assert inputs._value is not None, "Input Expression does not have numerical values"
-            return formula.robustness_trace(inputs._value, pscale=pscale, scale=scale, **kwargs)
+            return formula.robustness_trace(inputs._value, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         elif isinstance(inputs, torch.Tensor):
-            return formula.robustness_trace(inputs, pscale=pscale, scale=scale, **kwargs)
+            return formula.robustness_trace(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         elif isinstance(inputs, tuple):
-            return formula.robustness_trace(convert_to_input_values(inputs), pscale=pscale, scale=scale, **kwargs)
+            return formula.robustness_trace(convert_to_input_values(inputs), pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         else:
             raise ValueError("Not a invalid input trace")
 
@@ -214,11 +231,11 @@ class Temporal_Operator(STL_Formula):
 
         if self.interval is None:
             input_ = torch.cat([h0, x], dim=1)                          # [batch_size, rnn_dim+1, x_dim]
-            output = state = self.operation(input_, scale, dim=1)       # [batch_size, 1, x_dim]
+            output = state = self.operation(input_, scale, dim=1, keepdim=True)       # [batch_size, 1, x_dim]
         else:
             h0x = torch.cat([h0, x], dim=1)                             # [batch_size, rnn_dim+1, x_dim]
             input_ = h0x[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
-            output = self.operation(input_, scale, dim=1)               # [batch_size, 1, x_dim]
+            output = self.operation(input_, scale, dim=1, keepdim=True)               # [batch_size, 1, x_dim]
             state = h0x[:,1:,:]                                         # [batch_size, rnn_dim, x_dim]
         return output, state
 
@@ -235,8 +252,8 @@ class Temporal_Operator(STL_Formula):
 
         return outputs, states
 
-    def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
-        trace = self.subformula(inputs, pscale=pscale, scale=scale)
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
+        trace = self.subformula(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         outputs, states = self._run_rnn_cell(trace, scale=scale)
         return torch.cat(outputs, dim=1)                              # [batch_size, time_dim, ...]
 
@@ -360,8 +377,8 @@ class Negation(STL_Formula):
         super(Negation, self).__init__()
         self.subformula = subformula
 
-    def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
-        return -self.subformula(inputs, pscale=pscale, scale=scale)*pscale
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
+        return -self.subformula(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)*pscale
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -381,12 +398,12 @@ class Implies(STL_Formula):
         self.operation = Maxish()
 
 
-    def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
         x, y = inputs
-        trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        trace2 = self.subformula2(y, pscale=pscale, scale=scale)
+        trace1 = self.subformula1(x, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
+        trace2 = self.subformula2(y, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         xx = torch.stack([-trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
-        return self.operation(xx, scale, dim=-1, keepdim=False)   # [batch_size, time_dim, ...]
+        return self.operation(xx, scale, dim=-1, keepdim=keepdim)   # [batch_size, time_dim, ...]
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -407,19 +424,19 @@ class And(STL_Formula):
         self.operation = Minish()
 
     @staticmethod
-    def separate_and(formula, input_):
+    def separate_and(formula, input_, pscale=1, scale=-1, keepdim=True, **kwargs):
         if formula.__class__.__name__ != "And":
-            return formula(input_)
+            return formula(input_, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         else:
-            return torch.cat([And.separate_and(formula.subformula1, input_[0]), And.separate_and(formula.subformula2, input_[1])], axis=-1)
+            return torch.cat([And.separate_and(formula.subformula1, input_[0], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs), And.separate_and(formula.subformula2, input_[1], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)], axis=-1)
 
-    def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
-        xx = torch.cat([And.separate_and(self.subformula1, inputs[0]), And.separate_and(self.subformula2, inputs[1])], axis=-1)
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
+        xx = torch.cat([And.separate_and(self.subformula1, inputs[0], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs), And.separate_and(self.subformula2, inputs[1], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)], axis=-1)
         # x, y = inputs
         # trace1 = self.subformula1(x, pscale=pscale, scale=scale)
         # trace2 = self.subformula2(y, pscale=pscale, scale=scale)
         # xx = torch.stack([trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
-        return self.operation(xx, scale, dim=-1, keepdim=False)                                         # [batch_size, time_dim, ...]
+        return self.operation(xx, scale, dim=-1, keepdim=keepdim)                                         # [batch_size, time_dim, ...]
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -440,19 +457,19 @@ class Or(STL_Formula):
         self.operation = Maxish()
 
     @staticmethod
-    def separate_or(formula, input_):
+    def separate_or(formula, input_, pscale=1, scale=-1, keepdim=True, **kwargs):
         if formula.__class__.__name__ != "Or":
-            return formula(input_)
+            return formula(input_, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         else:
-            return torch.cat([Or.separate_or(formula.subformula1, input_[0]), Or.separate_or(formula.subformula2, input_[1])], axis=-1)
+            return torch.cat([Or.separate_or(formula.subformula1, input_[0], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs), Or.separate_or(formula.subformula2, input_[1], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)], axis=-1)
 
-    def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
-        xx = torch.cat([Or.separate_or(self.subformula1, inputs[0]), Or.separate_or(self.subformula2, inputs[1])], axis=-1)
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
+        xx = torch.cat([Or.separate_or(self.subformula1, inputs[0], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs), Or.separate_or(self.subformula2, inputs[1], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)], axis=-1)
         # x, y = inputs
         # trace1 = self.subformula1(x, pscale=pscale, scale=scale)
         # trace2 = self.subformula2(y, pscale=pscale, scale=scale)
         # xx = torch.stack([trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
-        return self.operation(xx, scale, dim=-1, keepdim=False)                                         # [batch_size, time_dim, ...]
+        return self.operation(xx, scale, dim=-1, keepdim=keepdim)                                         # [batch_size, time_dim, ...]
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -460,7 +477,6 @@ class Or(STL_Formula):
 
     def __str__(self):
         return "(" + str(self.subformula1) + ") ∨ (" + str(self.subformula2) + ")"
-
 
 class Until(STL_Formula):
     def __init__(self, subformula1="Until subformula1", subformula2="Until subformula2"):
@@ -471,25 +487,25 @@ class Until(STL_Formula):
         self.subformula1 = subformula1
         self.subformula2 = subformula2
 
-    def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
         '''
         trace1 is the robustness trace of ϕ
         trace2 is the robustness trace of ψ
         trace1 and trace2 are size [batch_size, time_dim, x_dim]
         '''
         x, y = inputs
-        trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        trace2 = self.subformula2(y, pscale=pscale, scale=scale)
+        trace1 = self.subformula1(x, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
+        trace2 = self.subformula2(y, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         Alw = Always(subformula=Identity(name=str(self.subformula1)))
         minish = Minish()
         maxish = Maxish()
         LHS = trace2.unsqueeze(-1).repeat([1, 1, 1,trace2.shape[1]]).permute(0, 3, 2, 1)                                  # [batch_size, time_dim, x_dim, time_dim]
         RHS = torch.ones(LHS.shape).to(x.device)*-LARGE_NUMBER                                                    # [batch_size, time_dim, x_dim, time_dim]
         for i in range(trace2.shape[1]):
-            RHS[:,i:,:,i] = Alw(trace1[:,i:,:], pscale=pscale, scale=scale)
+            RHS[:,i:,:,i] = Alw(trace1[:,i:,:], pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         # first min over the (ρ(ψ), ◻ρ(ϕ))
         # then max over the t′ dimension (the second time_dime dimension)
-        return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1).squeeze(-1), scale=scale, dim=-1).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
+        return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1, keepdim=keepdim).squeeze(-1), scale=scale, dim=-1, keepdim=keepdim).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -507,25 +523,25 @@ class Then(STL_Formula):
         self.subformula1 = subformula1
         self.subformula2 = subformula2
 
-    def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, **kwargs):
         '''
         trace1 is the robustness trace of ϕ
         trace2 is the robustness trace of ψ
         trace1 and trace2 are size [batch_size, time_dim, x_dim]
         '''
         x, y = inputs
-        trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        trace2 = self.subformula2(y, pscale=pscale, scale=scale)
+        trace1 = self.subformula1(x, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
+        trace2 = self.subformula2(y, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)
         Ev = Eventually(subformula=Identity(name=str(self.subformula1)))
         minish = Minish()
         maxish = Maxish()
         LHS = trace2.unsqueeze(-1).repeat([1, 1, 1,trace2.shape[1]]).permute(0, 3, 2, 1)                                  # [batch_size, time_dim, x_dim, time_dim]
         RHS = torch.ones(LHS.shape)*-LARGE_NUMBER                                                 # [batch_size, time_dim, x_dim, time_dim]
         for i in range(trace2.shape[1]):
-            RHS[:,i:,:,i] = Ev(trace1[:,i:,:], pscale=pscale, scale=scale)
+            RHS[:,i:,:,i] = Ev(trace1[:,i:,:], pscale=pscale, scale=scale,keepdim=keepdim, **kwargs)
         # first min over the (ρ(ψ), ◻ρ(ϕ))
         # then max over the t′ dimension (the second time_dime dimension)
-        return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1).squeeze(-1), scale=scale, dim=-1).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
+        return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1, keepdim=keepdim).squeeze(-1), scale=scale, dim=-1, keepdim=keepdim).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
