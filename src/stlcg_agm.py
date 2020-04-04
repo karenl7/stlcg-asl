@@ -20,6 +20,8 @@ Important information:
 # - Run tests to ensure that "Expression" correctly overrides operators
 # - Make a test for each temporal operator, and make sure that they all produce the expected output for at least one example trace
 # - Implement log-barrier
+# - option to choose type of padding
+# - option to choose type of softmax/softmin
 
 LARGE_NUMBER = 1E4
 
@@ -550,6 +552,47 @@ class Then(STL_Formula):
     def __str__(self):
         return  "(" + str(self.subformula1) + ")" + " T " + "(" + str(self.subformula2) + ")"
 
+class Integral1d(STL_Formula):
+    def __init__(self, subformula, interval=None, signal_length_max=200, integration_scheme="riemann", padding_type="same", custom_number=100):
+        super(Integral1d, self).__init__()
+        self.subformula = subformula
+        padding_size = signal_length_max - 1 if interval is None else interval[1]
+        kernel = signal_length_max if interval is None else (interval[1] - interval[0] + 1)
+        self.interval = interval
+        self.padding_type = padding_type
+        if padding_type == "zero":
+            self.padding = torch.zeros([1, padding_size, 1])
+        elif padding_type == "custom":
+            self.padding = torch.ones([1, padding_size, 1])*custom_number
+        elif padding_type == "same":
+            self.padding = torch.ones([1, padding_size, 1])
+        
+        self.conv = torch.nn.Conv1d(1, 1, kernel, padding=0, bias=False)
+        for param in self.conv.parameters():
+            param.requires_grad = False
+        self.conv.weight /= self.conv.weight
+        
+        if integration_scheme == "trapz":
+            self.conv.weight[:,:,0] /= 2
+            self.conv.weight[:,:,-1] /= 2
+
+
+    def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=False, use_relu=False, **kwargs):
+        padding = self.padding
+        if self.padding_type == "same":
+            padding = self.padding * self.subformula(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)[:,0,:]
+        signal = torch.cat([padding.to("cpu"), self.subformula(inputs, pscale=pscale, scale=scale, keepdim=keepdim, **kwargs)], dim=1).transpose(1,2)
+        if use_relu:
+            return self.conv(torch.relu(signal)).transpose(1,2)[:,:signal.shape[2],:]
+        else:
+            return self.conv(signal).transpose(1,2)[:,:signal.shape[2],:]
+
+    def _next_function(self):
+        # next function is actually input (traverses the graph backwards)
+        return [self.subformula]
+
+    def __str__(self):
+        return "I" + str(self.interval) + "(" + str(self.subformula) + ")"
 
 class Expression(torch.nn.Module):
     '''
