@@ -93,7 +93,22 @@ class Maxish(torch.nn.Module):
                 return (torch.softmax(x*scale, dim=dim)*x).sum(dim, keepdim=keepdim)
 
         else:
-            return x.max(dim, keepdim=keepdim)[0]
+            return self.distributed_true_max(x, dim=dim, keepdim=keepdim)
+            # return x.max(dim, keepdim=keepdim)[0]
+
+    @staticmethod
+    def distributed_true_max(xx, dim=1, keepdim=True):
+        c = 0.0
+        xs = torch.split(xx, 1, dim=1)                              # time_dim tuple
+        h = xs[0]
+        time_dim = len(xs)
+        for x in xs:
+            h = (x == h) * ((h * c + x)/ (c + 1)) + (x > h) * (x) + (x < h) * (h)
+            c = (x == h) * (c + 1.0) + (x > h) * (1.0) + (x < h) * (c)
+        if keepdim:
+            return h
+        else:
+            return h.squeeze(dim)
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -129,7 +144,22 @@ class Minish(torch.nn.Module):
             else:
                 return (torch.softmax(-x*scale, dim=dim)*x).sum(dim, keepdim=keepdim)
         else:
-            return x.min(dim, keepdim=keepdim)[0]
+            return self.distributed_true_min(x, dim=dim, keepdim=keepdim)
+            # return x.max(dim, keepdim=keepdim)[0]
+
+    @staticmethod
+    def distributed_true_min(xx, dim=1, keepdim=True):
+        c = 0.0
+        xs = torch.split(xx, 1, dim=1)                              # time_dim tuple
+        h = xs[0]
+        time_dim = len(xs)
+        for x in xs:
+            h = (x == h) * ((h * c + x)/ (c + 1)) + (x < h) * (x) + (x > h) * (h)
+            c = (x == h) * (c + 1.0) + (x < h) * (1.0) + (x > h) * (c)
+        if keepdim:
+            return h
+        else:
+            return h.squeeze(dim)
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -224,8 +254,9 @@ class Temporal_Operator(STL_Formula):
         self.rnn_dim = 1 if not self.interval else self.interval[-1]    # rnn_dim=1 if interval is [0, ∞) otherwise rnn_dim=end of interval
         self.steps = 1 if not self.interval else self.interval[-1] - self.interval[0] + 1   # steps=1 if interval is [0, ∞) otherwise steps=length of interval
         self.operation = None
-
-
+        self.M = torch.tensor(np.diag(np.ones(self.rnn_dim-1), k=1)).requires_grad_(False).float()
+        self.b = torch.zeros(self.rnn_dim).unsqueeze(-1).requires_grad_(False).float()
+        self.b[-1] = 1.0
 
     def _initialize_rnn_cell(self, x):
         '''
@@ -234,35 +265,42 @@ class Temporal_Operator(STL_Formula):
         '''
         raise NotImplementedError("_initialize_rnn_cell is not implemented")
 
-    def _rnn_cell(self, x, h0, scale=-1, agm=False, **kwargs):
+    def _rnn_cell(self, x, hc, scale=-1, agm=False, **kwargs):
         '''
         x: rnn input [batch_size, 1, ...]
         h0: input rnn hidden state  [batch_size, rnn_dim, ...]
         '''
-        if self.operation is None:
-            raise Exception()
+        raise NotImplementedError("_initialize_rnn_cell is not implemented")
+        # h0, c = hc
+        # if self.operation is None:
+        #     raise Exception()
 
-        if self.interval is None:
-            input_ = torch.cat([h0, x], dim=1)                          # [batch_size, rnn_dim+1, x_dim]
-            output = state = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)       # [batch_size, 1, x_dim]
-        else:
-            h0x = torch.cat([h0, x], dim=1)                             # [batch_size, rnn_dim+1, x_dim]
-            input_ = h0x[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
-            output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)               # [batch_size, 1, x_dim]
-            state = h0x[:,1:,:]                                         # [batch_size, rnn_dim, x_dim]
-        return output, state
+        # if self.interval is None:
+        #     new_h = (x == h0) * ((h0 * c + x)/ (c + 1)) + (x < h0) * (h0) + (x > h0) * (x)
+        #     new_c = (x == h0) * (c + 1.0) + (x < h0) * (c) + (x > h0) * (1.0)
+        #     state = (new_h, new_c)
+        #     output = new_h
+        #     # input_ = torch.cat([h0, x], dim=1)                          # [batch_size, rnn_dim+1, x_dim]
+        #     # output = state = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)       # [batch_size, 1, x_dim]
+        # else:
+        #     state = torch.matmul(self.M, h0) + self.b * x
+        #     # h0x = torch.cat([h0, x], dim=1)                             # [batch_size, rnn_dim+1, x_dim]
+        #     input_ = h0[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
+        #     output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)               # [batch_size, 1, x_dim]
+        #     # state = h0x[:,1:,:]                                         # [batch_size, rnn_dim, x_dim]
+        # return output, state
 
     def _run_rnn_cell(self, x, scale, agm=False):
         outputs = []
         states = []
-        h = self._initialize_rnn_cell(x)                                # [batch_size, rnn_dim, x_dim]
+        hc = self._initialize_rnn_cell(x)                                # [batch_size, rnn_dim, x_dim]
         xs = torch.split(x, 1, dim=1)                                   # time_dim tuple
         time_dim = len(xs)
         for i in range(time_dim):
-            o, h = self._rnn_cell(xs[i], h, scale, agm=agm)
+            o, hc = self._rnn_cell(xs[i], hc, scale, agm=agm)
             # IPython.embed(banner1="stop!")
             outputs.append(o)
-            states.append(h)
+            states.append(hc)
 
         return outputs, states
 
@@ -290,7 +328,33 @@ class Always(Temporal_Operator):
         '''
         # init_val = LARGE_NUMBER
         h0 = torch.ones([x.shape[0], self.rnn_dim, x.shape[2]])*x[:,0,:]
-        return h0.to(x.device)
+        count = 0.0
+        return (h0.to(x.device), count)
+
+    def _rnn_cell(self, x, hc, scale=-1, agm=False, **kwargs):
+        '''
+        x: rnn input [batch_size, 1, ...]
+        h0: input rnn hidden state  [batch_size, rnn_dim, ...]
+        '''
+        h0, c = hc
+        if self.operation is None:
+            raise Exception()
+
+        if self.interval is None:
+            new_h = (x == h0) * ((h0 * c + x)/ (c + 1)) + (x < h0) * (x) + (x > h0) * (h0)
+            new_c = (x == h0) * (c + 1.0) + (x < h0) * (1.0) + (x > h0) * (c)
+            state = (new_h, new_c)
+            output = new_h
+            # input_ = torch.cat([h0, x], dim=1)                          # [batch_size, rnn_dim+1, x_dim]
+            # output = state = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)       # [batch_size, 1, x_dim]
+        else:
+            # state = torch.matmul(self.M, h0) + self.b * x
+            # input_ = h0[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
+            # output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)               # [batch_size, 1, x_dim]
+            state = torch.matmul(self.M, h0) + self.b * x
+            input_ = h0[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
+            output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)               # [batch_size, 1, x_dim]
+        return output, state
 
     def __str__(self):
         return "◻ " + str(self._interval) + "( " + str(self.subformula) + " )"
@@ -308,7 +372,32 @@ class Eventually(Temporal_Operator):
         '''
         # init_val = -LARGE_NUMBER
         h0 = torch.ones([x.shape[0], self.rnn_dim, x.shape[2]])*x[:,0,:]
-        return h0.to(x.device)
+        count = 0.0
+        return (h0.to(x.device), count)
+
+    def _rnn_cell(self, x, hc, scale=-1, agm=False, **kwargs):
+        '''
+        x: rnn input [batch_size, 1, ...]
+        h0: input rnn hidden state  [batch_size, rnn_dim, ...]
+        '''
+        h0, c = hc
+        if self.operation is None:
+            raise Exception()
+
+        if self.interval is None:
+            new_h = (x == h0) * ((h0 * c + x)/ (c + 1)) + (x < h0) * (h0) + (x > h0) * (x)
+            new_c = (x == h0) * (c + 1.0) + (x < h0) * (c) + (x > h0) * (1.0)
+            state = (new_h, new_c)
+            output = new_h
+            # input_ = torch.cat([h0, x], dim=1)                          # [batch_size, rnn_dim+1, x_dim]
+            # output = state = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)       # [batch_size, 1, x_dim]
+        else:
+            state = torch.matmul(self.M, h0) + self.b * x
+            # h0x = torch.cat([h0, x], dim=1)                             # [batch_size, rnn_dim+1, x_dim]
+            input_ = h0[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
+            output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)               # [batch_size, 1, x_dim]
+            # state = h0x[:,1:,:]                                         # [batch_size, rnn_dim, x_dim]
+        return output, state
 
     def __str__(self):
         return "♢ " + str(self._interval) + "( " + str(self.subformula) + " )"
