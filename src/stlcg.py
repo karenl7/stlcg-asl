@@ -21,7 +21,6 @@ Important information:
 # - Make a test for each temporal operator, and make sure that they all produce the expected output for at least one example trace
 # - Implement log-barrier
 # - option to choose type of padding
-# - option to choose type of softmax/softmin
 
 LARGE_NUMBER = 1E4
 
@@ -104,20 +103,7 @@ class Maxish(torch.nn.Module):
         m, mi = torch.max(xx, dim, keepdim=True)
         inds = xx == m
         return torch.where(inds, xx, xx*0).sum(dim, keepdim=keepdim) / inds.sum(dim, keepdim=keepdim)
-        # # This is slow :( 
-        # c = 0.0
-        # xs = torch.split(xx, 1, dim=dim)                              # time_dim tuple
-        # h = xs[0]
-        # time_dim = len(xs)
-        # for x in xs:
-        #     h_ = (x == h) * ((h * c + x)/ (c + 1)) + (x > h) * (x) + (x < h) * (h)
-        #     c_ = (x == h) * (c + 1.0) + (x > h) * (1.0) + (x < h) * (c)
-        #     h = h_
-        #     c = c_
-        # if keepdim:
-        #     return h
-        # else:
-        #     return h.squeeze(dim)
+
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -163,20 +149,7 @@ class Minish(torch.nn.Module):
         m, mi = torch.min(xx, dim, keepdim=True)
         inds = xx == m
         return torch.where(inds, xx, xx*0).sum(dim, keepdim=keepdim) / inds.sum(dim, keepdim=keepdim)
-        # # This is slow :( 
-        # c = 0.0
-        # xs = torch.split(xx, 1, dim=dim)                              # time_dim tuple
-        # h = xs[0]
-        # time_dim = len(xs)
-        # for x in xs:
-        #     h_ = (x == h) * ((h * c + x)/ (c + 1)) + (x < h) * (x) + (x > h) * (h)
-        #     c_ = (x == h) * (c + 1.0) + (x < h) * (1.0) + (x > h) * (c)
-        #     h = h_
-        #     c = c_
-        # if keepdim:
-        #     return h
-        # else:
-        #     return h.squeeze(dim)
+
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -367,18 +340,13 @@ class Always(Temporal_Operator):
                 output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)       # [batch_size, 1, x_dim]
                 state = (output, None)
         else:
-            # state = torch.matmul(self.M, h0) + self.b * x
-            # input_ = h0[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
-            # output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm)               # [batch_size, 1, x_dim]
             if (self._interval[1] == np.inf) & (self._interval[0] > 0):
                 d0, h0 = h0
                 dh = torch.cat([d0, h0[:,:1,:]], dim=1)                             # [batch_size, 2, x_dim]
                 output = self.operation(dh, scale, dim=1, keepdim=True, agm=agm, distributed=distributed)               # [batch_size, 1, x_dim]
                 state = ((output, torch.matmul(self.M, h0) + self.b * x), None)    
             else:
-                # s = torch.cat([h0[:,1:,:], x], dim=1)
                 state = (torch.matmul(self.M, h0) + self.b * x, None)
-                # state = (s, None)
                 h0x = torch.cat([h0, x], dim=1)                             # [batch_size, rnn_dim+1, x_dim]
                 input_ = h0x[:,:self.steps,:]                               # [batch_size, self.steps, x_dim]
                 output = self.operation(input_, scale, dim=1, keepdim=True, agm=agm, distributed=distributed)               # [batch_size, 1, x_dim]
@@ -420,8 +388,15 @@ class Eventually(Temporal_Operator):
 
         if self.interval is None:
             if distributed:
-                new_h = (x == h0) * ((h0 * c + x)/ (c + 1)) + (x < h0) * (h0) + (x > h0) * (x)
-                new_c = (x == h0) * (c + 1.0) + (x < h0) * (c) + (x > h0) * (1.0)
+                if x == h0:
+                    new_h =  (h0 * c + x)/ (c + 1)
+                    new_c = c + 1.0
+                elif x > h0:
+                    new_h = x
+                    new_c = 1.0
+                else:
+                    new_h = h0
+                    new_c = c
                 state = (new_h, new_c)
                 output = new_h
             else:
@@ -580,10 +555,6 @@ class And(STL_Formula):
 
     def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, agm=False, distributed=False, **kwargs):
         xx = torch.cat([And.separate_and(self.subformula1, inputs[0], pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs), And.separate_and(self.subformula2, inputs[1], pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)], axis=-1)
-        # x, y = inputs
-        # trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        # trace2 = self.subformula2(y, pscale=pscale, scale=scale)
-        # xx = torch.stack([trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
         return self.operation(xx, scale, dim=-1, keepdim=keepdim, agm=agm, distributed=distributed)                                         # [batch_size, time_dim, ...]
 
     def _next_function(self):
@@ -613,10 +584,6 @@ class Or(STL_Formula):
 
     def robustness_trace(self, inputs, pscale=1, scale=-1, keepdim=True, agm=False, distributed=False, **kwargs):
         xx = torch.cat([Or.separate_or(self.subformula1, inputs[0], pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs), Or.separate_or(self.subformula2, inputs[1], pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)], axis=-1)
-        # x, y = inputs
-        # trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        # trace2 = self.subformula2(y, pscale=pscale, scale=scale)
-        # xx = torch.stack([trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
         return self.operation(xx, scale, dim=-1, keepdim=keepdim, agm=agm, distributed=distributed)                                         # [batch_size, time_dim, ...]
 
     def _next_function(self):
@@ -655,7 +622,7 @@ class Until(STL_Formula):
         for i in range(trace2.shape[1]):
             RHS[:,i:,:,i] = Alw(trace1[:,i:,:], pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
         # first min over the (ρ(ψ), ◻ρ(ϕ))
-        # then max over the t′ dimension (the second time_dime dimension)
+        # then max over the t′ dimension (the second time_dim dimension)
         return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1, keepdim=keepdim, agm=agm, distributed=distributed).squeeze(-1), scale=scale, dim=-1, keepdim=keepdim, agm=agm, distributed=distributed).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
 
     def _next_function(self):
@@ -694,7 +661,7 @@ class Then(STL_Formula):
         for i in range(trace2.shape[1]):
             RHS[:,i:,:,i] = Ev(trace1[:,i:,:], pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
         # first min over the (ρ(ψ), ◻ρ(ϕ))
-        # then max over the t′ dimension (the second time_dime dimension)
+        # then max over the t′ dimension (the second time_dim dimension)
         return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1, keepdim=keepdim, agm=agm, distributed=distributed).squeeze(-1), scale=scale, dim=-1, keepdim=keepdim, agm=agm, distributed=distributed).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
 
     def _next_function(self):
@@ -762,10 +729,6 @@ class Integral1d(STL_Formula):
             else:
                 return torch.cumsum(signal, dim=1)
 
-
-
-
-
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
         return [self.subformula]
@@ -773,6 +736,9 @@ class Integral1d(STL_Formula):
     def __str__(self):
         return "I" + str(self.interval) + "(" + str(self.subformula) + ")"
 
+
+
+# TODO" operation on ._value as well
 class Expression(torch.nn.Module):
     '''
     Wraps a pytorch arithmetic operation, so that we can intercept and overload comparison operators.
