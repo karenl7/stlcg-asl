@@ -832,7 +832,7 @@ class Expression(torch.nn.Module):
     Expression allows us to express tensors using their names to make it easier to code up and read, 
     but also keep track of their numeric values.
     '''
-    def __init__(self, name, value):
+    def __init__(self, name, value=None):
         super(Expression, self).__init__()
         self.name = name
         self.value = value

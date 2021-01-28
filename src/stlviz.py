@@ -56,7 +56,10 @@ def make_stl_graph(form, node_attr=dict(style='filled',
             color = "palegreen" if form.requires_grad else "lightskyblue"
             dot.node(str(id(form)), tensor_to_str(form), fillcolor=color)
         elif isinstance(form, Expression):
-            color = "palegreen" if form.value.requires_grad else "lightskyblue"
+            if form.value is None:
+                color = "lightskyblue"
+            else:
+                color = "palegreen" if form.value.requires_grad else "lightskyblue"
             dot.node(str(id(form)), form.name, fillcolor=color)
         elif type(form) == str:
             dot.node(str(id(form)), form, fillcolor="lightcoral")
