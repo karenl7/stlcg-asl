@@ -606,7 +606,7 @@ class Implies(STL_Formula):
         trace1 = self.subformula1(x, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
         trace2 = self.subformula2(y, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
         xx = torch.stack([-trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
-        return self.operation(xx, scale, dim=-1, keepdim=keepdim, agm=agm, distributed=distributed)   # [batch_size, time_dim, ...]
+        return self.operation(xx, scale, dim=-1, keepdim=False, agm=agm, distributed=distributed)   # [batch_size, time_dim, ...]
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
